@@ -1,10 +1,19 @@
 import os
+from dotenv import load_dotenv
 import plotly
 from io import BytesIO
 from pathlib import Path
 from typing import List
 
 from openai import AsyncAssistantEventHandler, AsyncOpenAI, OpenAI
+
+# Load environment variables from .env if present
+load_dotenv()
+
+# Ensure local files directory exists for uploads (Chainlit expects it)
+BASE_DIR = Path(__file__).parent
+FILES_DIR = BASE_DIR / ".files"
+FILES_DIR.mkdir(exist_ok=True)
 
 from literalai.helper import utc_now
 
@@ -50,17 +59,16 @@ class EventHandler(AsyncAssistantEventHandler):
                 if annotation.type == "file_path":
                     response = await async_openai_client.files.with_raw_response.content(annotation.file_path.file_id)
                     file_name = annotation.text.split("/")[-1]
+                    content_bytes = response.content
                     try:
-                        fig = plotly.io.from_json(response.content)
+                        content_str = content_bytes.decode("utf-8", errors="ignore")
+                        fig = plotly.io.from_json(content_str)
                         element = cl.Plotly(name=file_name, figure=fig)
-                        await cl.Message(
-                            content="",
-                            elements=[element]).send()
-                    except Exception as e:
-                        element = cl.File(content=response.content, name=file_name)
-                        await cl.Message(
-                            content="",
-                            elements=[element]).send()
+                        await cl.Message(content="", elements=[element]).send()
+                    except Exception:
+                        # Fallback: expose the produced file as a downloadable element
+                        element = cl.File(content=content_bytes, name=file_name)
+                        await cl.Message(content="", elements=[element]).send()
                     # Hack to fix links
                     if annotation.text in self.current_message.content and element.chainlit_key:
                         self.current_message.content = self.current_message.content.replace(annotation.text, f"/project/file/{element.chainlit_key}?session_id={cl.context.session.id}")
@@ -154,12 +162,13 @@ async def process_files(files: List[Element]):
     if len(files) > 0:
         file_ids = await upload_files(files)
 
+    # Always provide both tools; the assistant will choose the right one per file
     return [
         {
             "file_id": file_id,
-            "tools": [{"type": "code_interpreter"}, {"type": "file_search"}] if file.mime in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/markdown", "application/pdf", "text/plain"] else [{"type": "code_interpreter"}],
+            "tools": [{"type": "code_interpreter"}, {"type": "file_search"}],
         }
-        for file_id, file in zip(file_ids, files)
+        for file_id, _ in zip(file_ids, files)
     ]
 
 
@@ -184,8 +193,23 @@ async def start_chat():
     thread = await async_openai_client.beta.threads.create()
     # Store thread ID in user session for later use
     cl.user_session.set("thread_id", thread.id)
-    
-    
+    # Ensure per-session upload directory exists to avoid FileNotFoundError on uploads
+    try:
+        session_id = cl.context.session.id
+        session_files_dir = FILES_DIR / session_id
+        session_files_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    # Send a welcome message with an image
+    await cl.Message(
+        content=(
+            "![Databotik](/public/idea.svg)\n\n"
+            "### Добро пожаловать в Databotik\n"
+            "Умный помощник для анализа ваших данных. Загрузите CSV/XLSX и напишите 'analyze'."
+        )
+    ).send()
+
+
 @cl.on_stop
 async def stop_chat():
     current_run_step: RunStep = cl.user_session.get("run_step")
