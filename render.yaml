@@ -1,9 +1,9 @@
 # Exported from Render on 2024-05-20T20:56:35Z
 services:
   - type: web
-    name: Chainlit-Data-Analyst
+    name: Chainlit-Databotik
     runtime: python
-    repo: https://github.com/willydouhard/data-analyst
+    repo: https://github.com/Artisa111/Databotik.git
     plan: starter
     envVars:
       - key: OPENAI_API_KEY

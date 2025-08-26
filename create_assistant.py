@@ -20,10 +20,13 @@ tools = [
     {"type": "file_search"}
 ]
 
-file = openai_client.files.create(
-  file=open("tesla-stock-price.csv", "rb"),
-  purpose='assistants'
-)
+sample_file_path = os.environ.get("SAMPLE_CSV_PATH")
+file = None
+if sample_file_path and os.path.exists(sample_file_path):
+    file = openai_client.files.create(
+      file=open(sample_file_path, "rb"),
+      purpose='assistants'
+    )
 
 
 assistant = openai_client.beta.assistants.create(
@@ -32,11 +35,9 @@ assistant = openai_client.beta.assistants.create(
     instructions=instructions,
     temperature=0.1,
     tools=tools,
-    tool_resources={
-        "code_interpreter": {
-        "file_ids": [file.id]
-        }
-    }
+    tool_resources=(
+        {"code_interpreter": {"file_ids": [file.id]}} if file else None
+    )
 )
 
 print(f"Assistant created with id: {assistant.id}")

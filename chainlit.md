@@ -1,9 +1,7 @@
-<div align="center">
+## 🐼 Hello! I am Panda - Databotik
 
-<img src="/public/idea.svg" alt="Databotik" width="120"/>
+I can help you upload a file (CSV/XLSX/JSON), explore the data, build Plotly charts, and save them as file_path JSON.
 
-### Добро пожаловать в Databotik
+Start by uploading a file or choose one of the starter options above.
 
-Умный помощник для анализа ваших данных. Загрузите CSV/XLSX и начните диалог.
-
-</div>
+[Repo](https://github.com/Artisa111/Databotik)

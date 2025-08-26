@@ -1,5 +1,4 @@
 import os
-from dotenv import load_dotenv
 import plotly
 from io import BytesIO
 from pathlib import Path
@@ -7,19 +6,12 @@ from typing import List
 
 from openai import AsyncAssistantEventHandler, AsyncOpenAI, OpenAI
 
-# Load environment variables from .env if present
-load_dotenv()
-
-# Ensure local files directory exists for uploads (Chainlit expects it)
-BASE_DIR = Path(__file__).parent
-FILES_DIR = BASE_DIR / ".files"
-FILES_DIR.mkdir(exist_ok=True)
-
 from literalai.helper import utc_now
 
 import chainlit as cl
 from chainlit.config import config
 from chainlit.element import Element
+# from chainlit.types import InputAudioChunk  # Not available in installed Chainlit
 from openai.types.beta.threads.runs import RunStep
 
 
@@ -31,6 +23,11 @@ assistant = sync_openai_client.beta.assistants.retrieve(
 )
 
 config.ui.name = assistant.name
+
+# Ensure base files directory exists for Chainlit persisted elements
+BASE_DIR = Path(__file__).parent
+FILES_ROOT = BASE_DIR / ".files"
+FILES_ROOT.mkdir(parents=True, exist_ok=True)
 
 class EventHandler(AsyncAssistantEventHandler):
 
@@ -59,16 +56,39 @@ class EventHandler(AsyncAssistantEventHandler):
                 if annotation.type == "file_path":
                     response = await async_openai_client.files.with_raw_response.content(annotation.file_path.file_id)
                     file_name = annotation.text.split("/")[-1]
-                    content_bytes = response.content
                     try:
-                        content_str = content_bytes.decode("utf-8", errors="ignore")
-                        fig = plotly.io.from_json(content_str)
+                        # Convert bytes to string for plotly JSON parsing
+                        json_content = response.content.decode('utf-8')
+                        
+                        # Try to clean up incompatible chart types
+                        import json
+                        chart_data = json.loads(json_content)
+                        
+                        # Replace incompatible chart types
+                        if 'data' in chart_data:
+                            for trace in chart_data['data']:
+                                if trace.get('type') == 'heatmapgl':
+                                    trace['type'] = 'heatmap'
+                        
+                        # Clean up template data that might have incompatible types
+                        if 'layout' in chart_data and 'template' in chart_data['layout']:
+                            template = chart_data['layout']['template']
+                            if 'data' in template and 'heatmapgl' in template['data']:
+                                del template['data']['heatmapgl']
+                        
+                        fig = plotly.io.from_json(json.dumps(chart_data))
                         element = cl.Plotly(name=file_name, figure=fig)
-                        await cl.Message(content="", elements=[element]).send()
-                    except Exception:
-                        # Fallback: expose the produced file as a downloadable element
-                        element = cl.File(content=content_bytes, name=file_name)
-                        await cl.Message(content="", elements=[element]).send()
+                        await cl.Message(
+                            content="",
+                            elements=[element]).send()
+                        print(f"Successfully created Plotly chart: {file_name}")
+                    except Exception as e:
+                        print(f"Error creating Plotly chart: {e}")
+                        # Fall back to downloadable file
+                        element = cl.File(content=response.content, name=file_name)
+                        await cl.Message(
+                            content=f"Chart created, but displayed as a file: {file_name}",
+                            elements=[element]).send()
                     # Hack to fix links
                     if annotation.text in self.current_message.content and element.chainlit_key:
                         self.current_message.content = self.current_message.content.replace(annotation.text, f"/project/file/{element.chainlit_key}?session_id={cl.context.session.id}")
@@ -122,7 +142,7 @@ class EventHandler(AsyncAssistantEventHandler):
         self.current_step.end = utc_now()
         await self.current_step.update()
 
-    async def on_image_file_done(self, image_file, message):
+    async def on_image_file_done(self, image_file):
         image_id = image_file.file_id
         response = await async_openai_client.files.with_raw_response.content(image_id)
         image_element = cl.Image(
@@ -162,13 +182,12 @@ async def process_files(files: List[Element]):
     if len(files) > 0:
         file_ids = await upload_files(files)
 
-    # Always provide both tools; the assistant will choose the right one per file
     return [
         {
             "file_id": file_id,
-            "tools": [{"type": "code_interpreter"}, {"type": "file_search"}],
+            "tools": [{"type": "code_interpreter"}, {"type": "file_search"}] if file.mime in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/markdown", "application/pdf", "text/plain"] else [{"type": "code_interpreter"}],
         }
-        for file_id, _ in zip(file_ids, files)
+        for file_id, file in zip(file_ids, files)
     ]
 
 
@@ -176,16 +195,21 @@ async def process_files(files: List[Element]):
 async def set_starters():
     return [
         cl.Starter(
-            label="Run Tesla stock analysis",
-            message="Make a data analysis on the tesla-stock-price.csv file I previously uploaded.",
+            label="📊 Analyze my file",
+            message="Analyze the CSV/XLSX I upload and build charts.",
             icon="/public/write.svg",
-            ),
+        ),
         cl.Starter(
-            label="Run a data analysis on my CSV",
-            message="Make a data analysis on the next CSV file I will upload.",
+            label="🧹 Clean and prepare data",
+            message="Run EDA: check missing values, outliers, column types and suggest transforms.",
             icon="/public/write.svg",
-            )
-        ]
+        ),
+        cl.Starter(
+            label="📈 Create multiple visualizations",
+            message="Create 3–4 useful charts for my dataset and save them as plotly.json.",
+            icon="/public/write.svg",
+        )
+    ]
 
 @cl.on_chat_start
 async def start_chat():
@@ -193,23 +217,16 @@ async def start_chat():
     thread = await async_openai_client.beta.threads.create()
     # Store thread ID in user session for later use
     cl.user_session.set("thread_id", thread.id)
-    # Ensure per-session upload directory exists to avoid FileNotFoundError on uploads
+    # Ensure per-session files directory exists for uploads/persistence
     try:
         session_id = cl.context.session.id
-        session_files_dir = FILES_DIR / session_id
-        session_files_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = FILES_ROOT / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    # Send a welcome message with an image
-    await cl.Message(
-        content=(
-            "![Databotik](/public/idea.svg)\n\n"
-            "### Добро пожаловать в Databotik\n"
-            "Умный помощник для анализа ваших данных. Загрузите CSV/XLSX и напишите 'analyze'."
-        )
-    ).send()
-
-
+    # No welcome chat message; banner is handled via chainlit.md to keep starters visible
+    
+    
 @cl.on_stop
 async def stop_chat():
     current_run_step: RunStep = cl.user_session.get("run_step")
@@ -235,6 +252,19 @@ async def main(message: cl.Message):
     async with async_openai_client.beta.threads.runs.stream(
         thread_id=thread_id,
         assistant_id=assistant.id,
+        instructions=(
+            "Respond in the user's language (Russian/English/Hebrew). "
+            "Always use the code_interpreter. "
+            "When creating Plotly charts, after creation run: "
+            'open("/mnt/data/plotly.json","w",encoding="utf-8").write(fig.to_json()). '
+            "Attach the file as file_path; do not inline an image instead of JSON. "
+            "\n\n"
+            "ענה בשפת המשתמש (רוסית/אנגלית/עברית). "
+            "תמיד השתמש ב-code_interpreter. "
+            "כאשר אתה יוצר תרשימי Plotly, לאחר יצירתם הרץ: "
+            'open("/mnt/data/plotly.json","w",encoding="utf-8").write(fig.to_json()). '
+            "צרף את הקובץ כ-file_path; אל תצרף תמונה במקום JSON."
+        ),
         event_handler=EventHandler(assistant_name=assistant.name),
     ) as stream:
         await stream.until_done()
@@ -242,38 +272,53 @@ async def main(message: cl.Message):
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.AudioChunk):
+    # Write the chunks to a buffer and transcribe the whole audio at the end
     if chunk.isStart:
         buffer = BytesIO()
-        # This is required for whisper to recognize the file type
         buffer.name = f"input_audio.{chunk.mimeType.split('/')[1]}"
-        # Initialize the session for a new audio stream
+        # Create per-session directory to persist files if needed
+        try:
+            session_id = cl.context.session.id
+            session_dir = (FILES_ROOT / session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         cl.user_session.set("audio_buffer", buffer)
         cl.user_session.set("audio_mime_type", chunk.mimeType)
 
-    # Write the chunks to a buffer and transcribe the whole audio at the end
-    cl.user_session.get("audio_buffer").write(chunk.data)
-
+    audio_buffer = cl.user_session.get("audio_buffer")
+    if audio_buffer:
+        audio_buffer.write(chunk.data)
 
 @cl.on_audio_end
-async def on_audio_end(elements: list[Element]):
+async def on_audio_end():
     # Get the audio buffer from the session
     audio_buffer: BytesIO = cl.user_session.get("audio_buffer")
-    audio_buffer.seek(0)  # Move the file pointer to the beginning
+    if not audio_buffer:
+        return
+    audio_buffer.seek(0)
     audio_file = audio_buffer.read()
     audio_mime_type: str = cl.user_session.get("audio_mime_type")
 
+    if not audio_file:
+        return
+
     input_audio_el = cl.Audio(
-        mime=audio_mime_type, content=audio_file, name=audio_buffer.name
+        mime=audio_mime_type if audio_mime_type else None,
+        content=audio_file,
+        name=getattr(audio_buffer, "name", "input_audio.wav")
     )
     await cl.Message(
         type="user_message",
         content="",
-        elements=[input_audio_el, *elements],
+        elements=[input_audio_el],
     ).send()
 
-    whisper_input = (audio_buffer.name, audio_file, audio_mime_type)
+    # Transcribe
+    audio_buffer.seek(0)
+    whisper_input = (input_audio_el.name, audio_file, audio_mime_type or "audio/wav")
     transcription = await speech_to_text(whisper_input)
 
-    msg = cl.Message(author="You", content=transcription, elements=elements)
-
+    msg = cl.Message(author="You", content=transcription)
     await main(message=msg)
+
