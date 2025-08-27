@@ -92,7 +92,7 @@ chainlit run app.py --host 127.0.0.1 --port 8000
 
 **💜 נוצר באהבה לאנליטיקת נתונים**
 
-*עשוי עם ❤️ על ידי מפתחים שאוהבים נתונים*
+
 
 </div>
 
